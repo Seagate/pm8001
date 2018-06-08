@@ -1,0 +1,210 @@
+###Scripts to Install PMC HBA driver
+#!/bin/bash
+##$1 is install flag, should be either uninstall or install with new wwn
+##$2 is new wwn
+installFlag=$1
+installFlag1=$3
+value1=$2
+value2=$4
+installCheck="uninstall"
+##wwnValue=$2
+wwnflag=0
+wwnflag4=0
+wwnflag8=0
+##debugLevel=$2
+debugflag=0
+##wwwnValue=$3
+##debugLevel=$3
+## If first argument does not match requirement, ask user type
+## pm8001install help to get help
+if [ "$installFlag" != "help" ]; then
+   if [ "$installFlag" != "uninstall" ]; then
+      if [ "$installFlag" != "wwn4" ]; then
+         if [ "$installFlag" != "wwn8" ]; then
+            if [ "$installFlag" != "db" ]; then
+               if [ -n "$installFlag" ]; then
+                  echo Usage: pm8001install help
+                  exit
+               fi
+            fi
+         fi
+      fi
+   fi
+fi
+if [ "$installFlag" = "help" ]; then
+   echo pm8001 driver installation version 1.0
+   echo usage: 
+   echo        Uninstall pm8001 driver: pm8001install uninstall
+   echo        Install pm8001 driver with default wwn: pm8001install
+   echo        Install pm8001 driver with new wwn: 
+   echo        pm8001install wwn4 newwwn 
+   echo        or pm8001install wwn8 newwwn
+   echo        The newwwn must use the full 64 bit hex value, 16 hex digits
+   echo        A mandatory 0x as the leading 2 characters and also using hex 
+   echo        digits 0-9a-f only in lower case
+   echo        For example : 
+   echo        pm8001install wwn4 0x009911ff33e21a00 
+   echo        or pm8001install wwn8 0x009911ff33e21a00
+   echo        Install pm8001 driver with debug enabled: 
+   echo        pm8001install db newdebuglevel
+   echo        Install pm8001 driver with both debug enable and new wwn:  
+   echo        pm8001install db newdebuglevel wwn4 newwwn
+   echo        or pm8001install wwn4 newwwn db newdebuglevel
+   exit
+fi 
+## Uninstall old driver if exists
+if [ "$installFlag" = "$installCheck" ]; then
+   echo uninstall PM8001 HBA driver
+   ls /lib/modules/$(uname -r)/kernel/drivers/scsi/pm8001.ko &>/dev/null
+   founddriver=$?
+##   echo $founddriver
+   if [ $founddriver -eq 0 ]; then
+##     echo why enter here
+     rmmod /lib/modules/$(uname -r)/kernel/drivers/scsi/pm8001.ko
+     echo Remove driver module library pm8001.ko from kernel directory
+     rm /lib/modules/$(uname -r)/kernel/drivers/scsi/pm8001.ko
+   else
+     echo No driver library pm8001.ko was found in predefined kernel directory
+   fi
+   exit
+else
+   cp aap1img.bin /lib/firmware/.
+   cp ilaimg.bin /lib/firmware/.
+   cp iopimg.bin /lib/firmware/.
+   cp istrimg.bin /lib/firmware/.
+## Install new driver
+   if [ "$installFlag" = "wwn4" ]; then
+      wwnflag4=1
+      wwnflag=1
+   fi
+   if [ "$installFlag" = "wwn8" ]; then
+      wwnflag8=1
+      wwnflag=1
+   fi
+ 
+   if [ $wwnflag -eq 1 ]; then
+       debugLevel=$value2
+       wwnValue=$value1    
+       if [ "$installFlag1" = "db" ]; then
+          echo Install PM8001 HBA driver with new wwn $wwnValue and debug level $debugLevel
+          debugflag=1
+          if [ -z "$debugLevel" ]; then
+             echo No debug level is set
+             echo Type pm8001install help to get usage
+             exit
+          fi
+       else
+          echo Install PM8001 HBA driver with new wwn $wwnValue
+       fi
+##       wwnflag=1
+       if [ -z "$wwnValue" ]; then
+          echo No new wwn input
+          echo Type pm8001install help to get usage 
+          exit
+       fi
+   else
+       if [ "$installFlag" = "db" ]; then
+          wwnValue=$value2
+          debugLevel=$value1
+          debugflag=1
+          if [ "$installFlag1" = "wwn4" ]; then
+             wwnflag4=1
+             wwnflag=1
+          fi
+          if [ "$installFlag1" = "wwn8" ]; then
+             wwnflag8=1
+             wwnflag=1
+          fi
+
+          if [ $wwnflag -eq 1 ]; then
+             echo Install PM8001 HBA driver with debug flag $debugLevel and new wwn $wwnValue
+##             wwnflag=1
+             if [ -z "$wwnValue" ]; then
+                echo No new wwn input
+                echo Type pm8001install help to get usage
+                exit
+             fi
+          else
+             echo Install PM8001 HBA driver with debug flag $debugLevel
+          fi
+          if [ -z "$debugLevel" ]; then
+             echo No debug level is set
+             echo Type pm8001install help to get usage
+             exit
+          fi
+       fi
+   fi
+fi
+## Check if libsas is installed
+modprobe libsas &>/dev/null
+modprobeOutput=$?
+if [ $modprobeOutput -eq 0 ]; then
+   echo libsas is installed
+else
+   echo libsas can not be found installed. You have to install libsas before install pm8001 module
+   exit
+fi
+##modinfo pm8001 &>/dev/null
+ls /lib/modules/$(uname -r)/kernel/drivers/scsi/pm8001.ko &>/dev/null
+finddriver=$?
+if [ $finddriver -eq 0 ]; then
+   currentdir=$(pwd)
+   destdir=/lib/modules/$(uname -r)/kernel/drivers/scsi
+   echo 0 $destdir
+   if [ "$currentdir" != "$destdir" ]; then
+      echo Old installed driver found, remove it
+      rmmod /lib/modules/$(uname -r)/kernel/drivers/scsi/pm8001.ko
+      rm /lib/modules/$(uname -r)/kernel/drivers/scsi/pm8001.ko
+   fi
+fi
+ls /lib/modules/$(uname -r)/extra/pm8001.ko &>/dev/null
+finddriver=$?
+if [ $finddriver -eq 0 ]; then
+## remove existing pm8001.ko from extra directory  
+   rm /lib/modules/$(uname -r)/extra/pm8001.ko
+fi
+ls ./pm8001.ko &>/dev/null
+founddriver=$?
+if [ $founddriver -eq 0 ]; then
+   currentdir=$(pwd)
+   destdir=/lib/modules/$(uname -r)/kernel/drivers/scsi
+   echo 1 $destdir
+   if [ "$currentdir" != "$destdir" ]; then
+      echo Copy pm8001.ko to pre-defined kernel directory
+      cp pm8001.ko /lib/modules/$(uname -r)/kernel/drivers/scsi/pm8001.ko
+   fi
+else
+   echo We can not install driver. No driver module pm8001.ko was found within current directory
+   exit
+fi
+echo Install pm8001 driver
+if [ $wwnflag4 -eq 1 ]; then
+    if [ $debugflag -eq 1 ]; then
+       echo insmod /lib/modules/$(uname -r)/kernel/drivers/scsi/pm8001.ko pm8001_wwn_by4=$wwnValue pm8001_logging_level=$debugLevel
+       insmod /lib/modules/$(uname -r)/kernel/drivers/scsi/pm8001.ko pm8001_wwn_by4=$wwnValue pm8001_logging_level=$debugLevel
+    else
+       echo insmod /lib/modules/$(uname -r)/kernel/drivers/scsi/pm8001.ko pm8001_wwn_by4=$wwnValue 
+       insmod /lib/modules/$(uname -r)/kernel/drivers/scsi/pm8001.ko pm8001_wwn_by4=$wwnValue 
+    fi
+elif [ $wwnflag8 -eq 1 ]; then
+    if [ $debugflag -eq 1 ]; then
+       echo insmod /lib/modules/$(uname -r)/kernel/drivers/scsi/pm8001.ko pm8001_wwn_by8=$wwnValue pm8001_logging_level=$debugLevel
+       insmod /lib/modules/$(uname -r)/kernel/drivers/scsi/pm8001.ko pm8001_wwn_by8=$wwnValue pm8001_logging_level=$debugLevel
+    else
+       echo insmod /lib/modules/$(uname -r)/kernel/drivers/scsi/pm8001.ko pm8001_wwn_by8=$wwnValue
+       insmod /lib/modules/$(uname -r)/kernel/drivers/scsi/pm8001.ko pm8001_wwn_by8=$wwnValue
+    fi
+
+else
+##    echo install driver with default wwn
+    if [ $debugflag -eq 1 ]; then
+       echo insmod /lib/modules/$(uname -r)/kernel/drivers/scsi/pm8001.ko pm8001_logging_level=$debugLevel
+       insmod /lib/modules/$(uname -r)/kernel/drivers/scsi/pm8001.ko pm8001_logging_level=$debugLevel
+    else
+       echo insmod /lib/modules/$(uname -r)/kernel/drivers/scsi/pm8001.ko
+       insmod /lib/modules/$(uname -r)/kernel/drivers/scsi/pm8001.ko
+    fi
+fi
+depmod -a
+modinfo pm8001
+exit

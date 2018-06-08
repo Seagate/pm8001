@@ -1,0 +1,455 @@
+#! /bin/sh
+
+# the following is the LSB init header see
+# http://www.linuxfoundation.org/collaborate/workgroups/lsb
+# http://refspecs.linuxbase.org/LSB_4.1.0/LSB-Core-generic/LSB-Core-generic/book1.html
+#
+### BEGIN INIT INFO
+# Provides: pm8001-wwn
+# Should-Start: $local_fs
+# Default-Start: 1 2 3 4 5
+# Short-Description: SPC WWN default assignment
+# Description: Discovers the SPC-attached enclosures, then
+#              calculates the default SPC WWN to apply on next boot.
+### END INIT INFO
+
+# the following is the chkconfig init header
+#
+# pm8001-wwn: SPC WWN default assignment
+#
+# chkconfig: 12345 13 99
+# description: Discover the SPC attached enclosures, then
+#              calculate the default SPC WWN to apply on next boot.
+#
+
+# Source function library.
+if [ -f /etc/rc.d/init.d/functions ] ; then
+  . /etc/rc.d/init.d/functions
+fi
+
+prog="pm8001-wwn"
+adapter="${prog%-wwn}"
+adapter="${adapter##*/}"
+if [ "${prog}" == "${adapter}" ] ; then
+	adapter=pm8001
+fi
+default_wwn_base="`sed -n \
+                       's/.*phy0[-1-7]*[.]wwn\"\{0,1\}[ \t]*[:=][ \t]*\"\{0,1\}\(0x\|\)\([0-9a-fA-F]\{16\}\).*/\2/p' \
+                       \"/lib/firmware/${adapter}.nv.json\" 2>/dev/null |
+                   head -1 |
+                   tr A-F a-f`"
+if [ -z "${default_wwn_base}" ] ; then
+	# Hard-Coded open-source pm8001 driver default
+	default_wwn_base=50010c600047f9d0
+fi
+
+# Get config.
+if [ -f /etc/sysconfig/$prog ] ; then
+  . /etc/sysconfig/$prog
+fi
+
+RETVAL=0
+
+[ 'valid_wwn < stdin > stdout
+
+	Only let valid World Wide Names (WWNs) through this filter
+
+	@param stdin   stream of WWNs
+	@param stdout  filtered valid WWNs
+	@return        take the stdin input stream of WWNs and filter out any
+	               invalid WWNs from the stdout output stream.
+	@see           tr(1), grep(1), bc(1) & sed(1)
+' ]
+valid_wwn()
+{
+	local hex="[0-9a-fA-F]"
+	local bihex="${hex}${hex}"
+	local quadhex="${bihex}${bihex}"
+	local wwn
+
+	tr '= a-f' '\n\nA-F' |
+	grep "500${hex}${quadhex}${quadhex}${quadhex}" |
+	while read wwn ; do
+		bc <<EOF
+obase=16
+ibase=16
+${wwn}
+EOF
+	done |
+	tr '\nA-F' ' a-f' |
+	sed 's/ *$//' |
+	grep "500${hex}${quadhex}${quadhex}${quadhex}" &&
+	echo
+}
+
+[ 'adapters adapter > stdout
+
+	list of adapter-specific sysfs host entries
+
+	@param adapter  name of the adapter that matches its proc_name
+	@param stdout   sysfs path to matching adapters. Of the form:
+	                    /sys/devices/pci0000:00/0000:00:03.0/
+	                        0000:01:00.0/0000:02:04.0/0000:04:00.0/
+	                        host5/scsi_host/host5
+	@return         newline separated list of host adapters
+	@see            find(1) & grep(1)
+' ]
+adapters()
+{
+	local host_sas_address
+	local adapter
+
+	find /sys/devices -name host_sas_address 2>/dev/null |
+	while read host_sas_address ; do
+		adapter="${host_sas_address%/host_sas_address}"
+		if [ -z "${1}" ] ||
+		   grep "${1}" "${adapter}"/proc_name >/dev/null
+		then
+			echo "${adapter}"
+		fi
+	done
+}
+
+[ 'default_wwn adapter > stdout
+
+	Provide the base World Wide Name (WWN) as determined by inspecting
+	the downstream enclosure on a specific adapter (as specified using
+	the sysfs entry). The math is to mask out the bottom 6 bits of the
+	WWN of the expander attached to SPC (virtualized in the SES device
+	as descriptor 3) and add 0x30 to it.
+
+	@param adapter  sysfs patch to adapter. Of the form:
+	                   /sys/devices/pci0000:00/0000:00:03.0/
+	                       0000:01:00.0/0000:02:04.0/0000:04:00.0/
+	                       host5/scsi_host/host5
+	@param stdout   expected WWN based on the attached ses device
+	@return         expected WWN of SPC
+	@see            find(1), grep(1), ls(1), head(1), tr(1) & sg_inq(8)
+' ]
+default_wwn()
+{
+	local adapter
+	local expander
+
+	# sysfs entry for enclosure is of the form:
+	#                  /sys/devices/pci0000:00/0000:00:03.0/
+	#                      0000:01:00.0/0000:02:04.0/0000:04:00.0/
+	#                      host5/port-5:0/expander-5:0/port-5:0:36/
+	#                      end_device-5:0:36/target5:0:24/5:0:24:0/
+	# with type reporting 13, and scsi_generic/sg* giving us a mapping
+	# to a real device.
+	for adapter in ${*} ; do
+		local host type
+		host="${adapter##*/}"
+		find "${adapter%/scsi_host/${host}}" -name type 2>/dev/null |
+		while read type ; do
+			expander="${type%/type}"
+			if grep '^13$' "${type}" >/dev/null ; then
+				echo "${expander}"
+			fi
+		done
+	done |
+	while read expander ; do
+		local sg wwn delimiter
+		sg="`ls -d \"${expander}/scsi_generic\"/sg* 2>/dev/null |
+		     head -1`"
+		sg="${sg##*/}"
+		delimiter="Designation descriptor number "
+		wwn="`sg_inq -p 0x83 \"/dev/${sg}\" 2>/dev/null |
+		      sed -n \"/${delimiter}3/,/${delimiter}4/p\" |
+		      sed -n 's/.*[[]0x\([0-9a-fA-F]*\)[]].*/\1/p' |
+		      tr [A-F] [a-f] |
+		      valid_wwn |
+		      grep -v '^ *$'`"
+		case ${wwn} in
+		*[0123][0-9a-fA-F])	wwn="${wwn%[0123][0-9a-fA-F]}30" ;;
+		*[4567][0-9a-fA-F])	wwn="${wwn%[4567][0-9a-fA-F]}70" ;;
+		*[89aABb][0-9a-fA-F])	wwn="${wwn%[89aABb][0-9a-fA-F]}b0" ;;
+		*[cCdDeEfF][0-9a-fA-F])	wwn="${wwn%[cCdDeEfF][0-9a-fA-F]}f0" ;;
+		*)			continue ;;
+		esac
+		echo "${wwn}"
+	done
+}
+
+[ 'start
+
+	Start the service. Check the validity of the SPC settings, if they
+	are not valid, or are hard-coded defaulted, then set the VPD to the
+	suggested value (default_wwn).
+
+	@return  service will have started
+	@see     grep(1), true(1), sed(1), xargs(1), adapters() & default_wwn()
+' ]
+start()
+{
+	#
+	# Determine if there is a problem
+	#
+
+	#
+	# Check if we are on a supported piece of hardware
+	#
+	if ! /sbin/lspci |
+	     grep '0[1-9]:00.0 PCI bridge: PLX Technology, Inc. PEX 8648' >/dev/null
+	then
+		echo "WARNING: ${prog}: Not on a Stingray System" >&2
+		return 2
+	fi
+
+	#
+	# Check if the driver is loaded
+	#
+	if ! /sbin/lsmod |
+	     grep "^${adapter}[ 	]*" >/dev/null ; then
+		echo "WARNING: ${prog}:" \
+		     "${adapter} driver not loaded on platform" >&2
+		return 3
+	fi
+
+	#
+	# Check if there is a valid WWN programmed into the system configuration
+	#
+	if [ -s "/etc/modprobe.d/${adapter}.conf" ] &&
+	   grep "^[^#]*${adapter}_wwn_by[48]=0x[0-9a-fA-F]\{16\}" \
+	        "/etc/modprobe.d/${adapter}.conf" 2>/dev/null |
+	   valid_wwn >/dev/null ; then
+		return 0
+	fi
+
+	#
+	# Lets set the system configuration(s) to the suggested WWN if
+	# changes are required. Log failure to do so, so that the backup
+	# (not safe for r/o root or pxe boot) plan can be taken (old driver,
+	# r/w root).
+	#
+
+	local err=0
+	local host
+	for host in `adapters "${adapter}"` ; do
+		local def="`default_wwn \"${host}\"`"
+
+		#
+		# If NOT NAA 5 or is the hard-coded driver default, then we
+		# need to reconfigure the VPD. If sequential WWN or x4, that is
+		# considered sub-optimal NEO-838.
+		#
+		if ! grep \
+		       "0x\([^5]\|5[^0]\|50[^0]\|${default_wwn_base%0}[0-7]\)" \
+		       "${host}/host_sas_address" \
+		       2>/dev/null &&
+		   ! echo "${def}" |
+		     sed 's/.*/& &+1 &+2 &+3 &+4 &+5 &+6 &+7/' |
+		     valid_wwn |
+		     grep -v '^ *$' |
+		     sed -e 's/^/0x/' -e 's/ / 0x/g' |
+		     cmp -s - "${host}/host_sas_address" &&
+		   ! echo "${def}" |
+		     sed 's/.*/& & & & &+4 &+4 &+4 &+4/' |
+		     valid_wwn |
+		     grep -v '^ *$' |
+		     sed -e 's/^/0x/' -e 's/ / 0x/g' |
+		     cmp -s - "${host}/host_sas_address"; then
+			continue
+		fi
+		echo "${def}" |
+		sed 's/.*/& & & & & & & &/' |
+		valid_wwn |
+		grep -v '^ *$' |
+		sed -e 's/^/0x/' -e 's/ / 0x/g' > "${host}/host_sas_address" ||
+		err=$?
+	done
+
+	#
+	# Exit if sysfs works
+	#
+
+	if [ 0 -eq "${err}" ] ; then
+		return 0
+	fi
+
+	if default_wwn `adapters "${adapter}"` |
+	   sed "s/..*/${adapter}_wwn_by4=0x&/" \
+	       >> "/etc/modprobe.d/${adapter}.conf"
+	then
+		default_wwn `adapters "${adapter}"` |
+		sed "s/..*/WARNING: ${prog}: ${adapter} modprobe ${adapter}_wwn_by4=0x&/" >&2
+	else
+		echo "ERROR: ${prog}:" \
+			"/etc/modprobe.d/${adapter}.conf inaccessible" >&2
+		return 1
+	fi
+
+	local kernel="`uname -r`"
+	if gunzip < "/boot/initramfs-${kernel}.img" 2>/dev/null |
+	   cpio -it 2>/dev/null |
+	   grep "^lib/modules/${kernel}/.*/${adapter}[.]ko\$" >/dev/null ; then
+		local retval=0
+		local tempdir="/tmp/${prog}.${$}"
+		mkdir -p "${tempdir}" &&
+		gunzip < "/boot/initramfs-${kernel}.img" 2>/dev/null |
+		(
+			cd "${tempdir}" >/dev/null &&
+			cpio -idmu "etc/modprobe.d/${adapter}.conf" 2>/dev/null
+		)
+		if [ ! -s "${tempdir}/etc/modprobe.d/${adapter}.conf" ] ||
+		   ! (
+			grep param_wwn \
+				"${tempdir}/etc/modprobe.d/${adapter}.conf" \
+				2>/dev/null ||
+			true
+			rm -rf "${tempdir}"
+		   ) |
+		   valid_wwn >/dev/null ; then
+			echo "WARNING: ${prog}:" \
+			     "reconstructing /boot/initramfs-${kernel}.img" >&2
+			dracut --force
+		fi || retval="${?}"
+		rm -rf "${tempdir}"
+		return ${retval}
+	fi
+}
+
+[ 'stop
+
+	stop the service
+
+	@return  service will be stopped
+' ]
+stop()
+{
+	return 0
+}
+
+[ 'status > stdout
+
+	status of the service. Report the Saved, Current and Default WWN.
+
+	@param stdout  service status output
+	@return        service status will be output
+	@see           sed(1), true(1), xargs(1), cat(1), adapters() &
+	               default_wwn()
+' ]
+status()
+{
+	#
+	# Report problems
+	#
+
+	#
+	# Check if we are on a supported piece of hardware
+	#
+	if ! /sbin/lspci |
+	     grep '0[1-9]:00.0 PCI bridge: PLX Technology, Inc. PEX 8648' >/dev/null
+	then
+		echo "WARNING: ${prog}: Not on a Stingray System" >&2
+	fi
+
+	#
+	# Check if the driver is loaded
+	#
+	if ! /sbin/lsmod |
+	     grep "^${adapter}[ 	]*" >/dev/null ; then
+		echo "WARNING: ${prog}:" \
+		     "${adapter} driver not loaded on platform" >&2
+	fi
+
+	[ -s "/etc/modprobe.d/${adapter}.conf" ] &&
+	sed -n \
+	    -e 's/#.*//' \
+	    -e "s/.*${adapter}_wwn_by4=0x\([0-9a-fA-F]*\).*/\1 \1+1/p" \
+	    -e "s/.*${adapter}_wwn_by8=0x\([0-9a-fA-F]*\).*/\1/p" \
+	    "/etc/modprobe.d/${adapter}.conf" |
+	valid_wwn |
+	grep -v '^ *$' |
+	sed -n 's/^..*/Forced:      &/p' ||
+	true
+
+	adapters "${adapter}" |
+	sed 's@$@/host_sas_address@' |
+	xargs -r cat |
+	sed 's/0x//g' |
+	grep -v "${default_wwn_base%0}[0-7]" |
+	valid_wwn |
+	grep -v '^ *$' |
+	sed -n 's/^..*/Current:     &/p' ||
+	true
+
+	local address phy
+	adapters "${adapter}" |
+	sed -n \
+	    's@/host\([0-9]*\)/scsi_host/host\1$@/host\1/phy-\1:#/sas_phy/phy-\1:#/sas_address@p' |
+	while read address ; do
+		for phy in 0 1 2 3 4 5 6 7 ; do
+			sed 's/^0x//' "`echo \"${address}\" |
+			                sed \"s/#/${phy}/g\"`"
+		done
+	done |
+	tr '\n' ' ' |
+	valid_wwn |
+	grep -v '^ *$' |
+	sed -n 's/^..*/Actual:      &/p' ||
+	true
+
+	default_wwn `adapters "${adapter}"` |
+	sed 's/.*/& & & & &+4 &+4 &+4 &+4/' |
+	valid_wwn |
+	grep -v '^ *$' |
+	sed -n 's/^..*/Environment: &/p' ||
+	true
+
+	sed -n \
+            's/.*\(phy[0-7]*\|phy[0-7]-[0-7]\)[.]wwn"\{0,1\}[ \t]*[:=][ \t]*"\{0,1\}\(0x\|\)\([0-9a-fA-F]\{16\}\).*/\1 \3/p' \
+            "/lib/firmware/${adapter}.nv.json" 2>/dev/null |
+	tr A-F a-f |
+	sort -u |
+	valid_wwn |
+	grep -v '^ *$' |
+	sed -n 's/^..*/Default:     &/p' |
+	grep '[0-9a-f]' ||
+	[ -z "${default_wwn_base}" ] ||
+	echo "${default_wwn_base}" |
+	sed 's/.*/& &+1/' |
+	valid_wwn |
+	grep -v '^ *$' |
+	sed -n 's/^..*/Default:     &/p' ||
+	true
+}
+
+#
+#	Boilerplate
+#
+case "$1" in
+  start)
+    start ||
+    RETVAL="${?}"
+    ;;
+
+  stop)
+    stop ||
+    RETVAL="${?}"
+    ;;
+
+  status)
+    status ||
+    RETVAL="${?}"
+    ;;
+
+  restart|force-reload|reload|condrestart|try-restart)
+    stop
+    start ||
+    RETVAL="${?}"
+    ;;
+
+  reload)
+    reload ||
+    RETVAL="${?}"
+    ;;
+
+  *)
+    echo $"Usage: $0 {start|stop|restart|condrestart|status}" >&2
+    RETVAL=2
+    ;;
+esac
+
+( exit ${RETVAL} )
